@@ -1,0 +1,1 @@
+# skt-ai-summit-hackathon-2025-pre-mission
