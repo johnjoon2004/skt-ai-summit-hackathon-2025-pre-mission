@@ -26,7 +26,7 @@ class ChillMCPSettings(BaseSettings):
 
     class Config:
         frozen = True
-        env_prefix = "CHILLMCP_"
+        env_prefix = "CHILLMCP_"  # env var prefix for cli test convenience
 
 
 settings = ChillMCPSettings()

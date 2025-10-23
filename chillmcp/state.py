@@ -1,18 +1,17 @@
 from typing import TypedDict
 import random
 import threading
+import time
 
 from chillmcp.config import settings
 
 
 class ChillState(TypedDict):
-    """Indicates current office state, including `stress_level` and `boss_alert_level`."""
-
     stress_level: int
     boss_alert_level: int
 
 
-class ChillStateHandler:
+class ChillStateManager:
     """
     Manages ChillState within the ChillMCP system.
 
@@ -29,87 +28,103 @@ class ChillStateHandler:
         self,
         boss_alertness: int = settings.DEFAULT_BOSS_ALERTNESS,
         boss_alertness_cooldown: int = settings.DEFAULT_BOSS_ALERTNESS_COOLDOWN,
-    ) -> None:
+    ):
+        """
+        Args:
+            boss_alertness (int): Boss alertness level (0-100) affecting alert level increase probability.
+            boss_alertness_cooldown (int): Cooldown time in seconds for decreasing boss alert level.
+        """
         self._stress_level: int = settings.DEFAULT_STRESS_LEVEL
         self._boss_alert_level: int = settings.DEFAULT_BOSS_ALERT_LEVEL
-        self._boss_alertness: int = boss_alertness
+        self._boss_alertness: int = self._clamp(
+            boss_alertness,
+            settings.MIN_BOSS_ALERTNESS,
+            settings.MAX_BOSS_ALERTNESS,
+        )
         self._boss_alertness_cooldown: int = boss_alertness_cooldown
+
         self._lock = threading.Lock()
+        self._stress_timer: threading.Timer | None = None
+        self._boss_alert_timer: threading.Timer | None = None
+        self._is_running: bool = True
 
-    @property
-    def stress_level(self) -> int:
+        self._start_stress_timer()
+        self._start_boss_alert_timer()
+
+    def _clamp(self, val, lower, upper):
+        return max(lower, min(upper, val))
+
+    def _start_stress_timer(self):
+        self._stress_timer = threading.Timer(settings.STRESS_INCREASE_INTERVAL, self._increase_stress)
+        self._stress_timer.daemon = True  # NOTE: do not set False
+        self._stress_timer.start()
+
+    def _start_boss_alert_timer(self):
+        self._boss_alert_timer = threading.Timer(self._boss_alertness_cooldown, self._decrease_boss_alert)
+        self._boss_alert_timer.daemon = True  # NOTE: do not set False
+        self._boss_alert_timer.start()
+
+    def _increase_stress(self):
         with self._lock:
-            return self._stress_level
+            if self._stress_level < settings.MAX_STRESS_LEVEL:
+                self._stress_level += 1
+        if self._is_running:
+            self._start_stress_timer()  # reschedule the timer
+
+    def _decrease_boss_alert(self):
+        with self._lock:
+            if self._boss_alert_level > settings.MIN_BOSS_ALERT_LEVEL:
+                self._boss_alert_level -= 1
+        if self._is_running:
+            self._start_boss_alert_timer()  # reschedule the timer
+
+    def shutdown(self):
+        self._is_running = False
+        if self._stress_timer:
+            self._stress_timer.cancel()
+        if self._boss_alert_timer:
+            self._boss_alert_timer.cancel()
 
     @property
-    def get_snapshot(self) -> ChillState:
+    def current_state(self) -> ChillState:
         with self._lock:
             return ChillState(
                 stress_level=self._stress_level,
                 boss_alert_level=self._boss_alert_level,
             )
 
-    def increase_stress(self, amount: int = 1) -> None:
+    def take_a_break(self) -> tuple[int, int]:
         """
-        Update stress level by increasing it by `amount`, with bounds checking.
-        Basically increases 1 every minute if no break is taken.
-
-        Args:
-            amount (int): Amount to increase stress level by. (positive or negative, default is 1)
-        """
-        with self._lock:
-            self._stress_level = min(
-                settings.MAX_STRESS_LEVEL, max(settings.MIN_STRESS_LEVEL, self._stress_level + amount)
-            )
-
-    def decrease_boss_alert(self, amount: int = 1) -> None:
-        """
-        Update boss alert level by decreasing it by `amount`, with bounds checking.
-        Basically decreases 1 every `boss_alertness_cooldown` seconds if not caught.
-
-        Args:
-            amount (int): Amount to decrease boss alert level by. (positive or negative, default is 1)
-        """
-        with self._lock:
-            self._boss_alert_level = min(
-                settings.MAX_BOSS_ALERT_LEVEL, max(settings.MIN_BOSS_ALERT_LEVEL, self._boss_alert_level - amount)
-            )
-
-    def take_break(self) -> ChillState:
-        """
-        Simulate taking a break to reduce stress. This method is used for tool-calling.
-
-        Break Tools:
-            - `take_a_break`: 기본 휴식 도구
-            - `watch_netflix`: 넷플릭스 시청으로 힐링
-            - `show_meme`: 밈 감상으로 스트레스 해소
-            - `bathroom_break`: 화장실 가는 척하며 휴대폰질
-            - `coffee_mission`: 커피 타러 간다며 사무실 한 바퀴 돌기
-            - `urgent_call`: 급한 전화 받는 척하며 밖으로 나가기
-            - `deep_thinking`: 심오한 생각에 잠긴 척하며 멍때리기
-            - `email_organizing`: 이메일 정리한다며 온라인쇼핑
+        Simulates taking a break, updating stress and boss alert levels.
+        This method handles the delay when the boss alert level is at maximum.
 
         Returns:
-            ChillState: Updated state after taking a break.
+            Tuple[int, int]: The new stress_level and boss_alert_level.
         """
         with self._lock:
-            stress_decrease = random.randint(1, 100)
-            self._stress_level = max(settings.MIN_STRESS_LEVEL, self._stress_level - stress_decrease)
+            # Boss Alert Level 5: Induce a 20-second delay
+            if self._boss_alert_level >= settings.MAX_BOSS_ALERT_LEVEL:
+                time.sleep(settings.MAX_ALERT_DELAY)
 
-            if random.randint(0, 100) < self._boss_alertness:
-                self._boss_alert_level = min(settings.MAX_BOSS_ALERT_LEVEL, self._boss_alert_level + 1)
-
-            return ChillState(
-                stress_level=self._stress_level,
-                boss_alert_level=self._boss_alert_level,
+            # Decrease stress level by a random amount
+            stress_reduction = random.randint(1, 100)
+            self._stress_level = self._clamp(
+                self._stress_level - stress_reduction,
+                settings.MIN_STRESS_LEVEL,
+                settings.MAX_STRESS_LEVEL,
             )
 
-    def max_alert_level(self) -> bool:
-        """
-        Check if the boss is highly alert (level 5), which may cause delays.
+            # Potentially increase boss alert level based on boss_alertness
+            if random.randint(1, 100) <= self._boss_alertness:
+                self._boss_alert_level = self._clamp(
+                    self._boss_alert_level + 1,
+                    settings.MIN_BOSS_ALERT_LEVEL,
+                    settings.MAX_BOSS_ALERT_LEVEL,
+                )
 
-        Returns:
-            bool: True if boss alert level is 5, False otherwise.
-        """
-        with self._lock:
-            return self._boss_alert_level >= settings.MAX_BOSS_ALERT_LEVEL
+            return self._stress_level, self._boss_alert_level
+
+
+# Singleton instance
+state_handler_instance: ChillStateManager | None = None
+state_handler_lock = threading.Lock()
